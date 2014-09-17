@@ -21,6 +21,9 @@ module Csvlint
       header.each_with_index do |name,i|
         build_warnings(:header_name, :schema, nil, i+1, name) if fields[i].name != name
       end
+      if header.count != fields.count
+        build_warnings(:header_count, :schema, nil, nil, header.count, :header_count => fields.count)
+      end
       return valid?
     end
 
