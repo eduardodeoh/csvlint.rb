@@ -51,8 +51,12 @@ module Csvlint
 
       def validate_values(value, row, column)
         if constraints["pattern"]
-          build_errors(:pattern, :schema, row, column, value,
-           { "pattern" => constraints["pattern"] } ) if !value.nil? && !value.match( constraints["pattern"] )
+          #Fix to regex starting with "/...../"
+          pattern = eval(constraints["pattern"])
+          if pattern.is_a? Regexp
+            build_errors(:pattern, :schema, row, column, value,
+            { "pattern" => constraints["pattern"] } ) if !value.nil? && !value.match(pattern)
+          end
         end
         if constraints["unique"] == true
           if @uniques.include? value
