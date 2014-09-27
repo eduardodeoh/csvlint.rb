@@ -18,12 +18,14 @@ module Csvlint
 
     def validate_header(header)
       reset
-      header.each_with_index do |name,i|
-        build_warnings(:header_name, :schema, nil, i+1, name) if fields[i].name != name
-      end
       if header.count != fields.count
-        build_warnings(:header_count, :schema, nil, nil, header.count, :header_count => fields.count)
+        raise "Header CSV com #{header.count} colunas contra #{fields.count} colunas do arquivo de validação!"
+      else
+        header.each_with_index do |name,i|
+          build_warnings(:header_name, :schema, nil, i+1, name) if fields[i].name != name
+        end
       end
+
       return valid?
     end
 
