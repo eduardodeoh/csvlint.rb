@@ -58,11 +58,13 @@ module Csvlint
             { "pattern" => constraints["pattern"] } ) if !value.nil? && !value.match(pattern)
           end
         end
-        if constraints["unique"] == true
-          if @uniques.include? value
-            build_errors(:unique, :schema, row, column, value, { "unique" => true })
-          else
-            @uniques << value
+        unless value.blank?
+          if constraints["unique"] == true
+            if @uniques.include? value
+              build_errors(:unique, :schema, row, column, value, { "unique" => true })
+            else
+              @uniques << value
+            end
           end
         end
       end
