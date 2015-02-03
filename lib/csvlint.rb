@@ -1,10 +1,14 @@
-require "csvlint/version"
 require 'csv'
+require 'date'
 require 'open-uri'
-require 'mime/types'
+require 'set'
 require 'tempfile'
 
-require 'csvlint/types'
+require 'active_support/core_ext/date/conversions'
+require 'active_support/core_ext/time/conversions'
+require 'mime/types'
+require 'open_uri_redirections'
+
 require 'csvlint/error_message'
 require 'csvlint/error_collector'
 require 'csvlint/validate'

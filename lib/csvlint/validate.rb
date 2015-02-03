@@ -1,11 +1,8 @@
-require "open_uri_redirections"
-
 module Csvlint
 
   class Validator
 
     include Csvlint::ErrorCollector
-    include Csvlint::Types
 
     attr_reader :encoding, :content_type, :extension, :headers, :line_breaks, :dialect, :csv_header, :schema, :data
 
@@ -15,14 +12,14 @@ module Csvlint
       "Unclosed quoted field" => :unclosed_quote,
     }
 
-    def initialize(source, dialect = nil, schema = nil)
+    def initialize(source, dialect = nil, schema = nil, options = {})
       @source = source
       @formats = []
       @schema = schema
 
       @supplied_dialect = dialect != nil
 
-      @dialect = dialect_defaults = {
+      @dialect = {
         "header" => true,
         "delimiter" => ",",
         "skipInitialSpace" => true,
@@ -31,7 +28,7 @@ module Csvlint
       }.merge(dialect || {})
 
       @csv_header = @dialect["header"]
-
+      @limit_lines = options[:limit_lines]
       @csv_options = dialect_to_csv_options(@dialect)
       @extension = parse_extension(source)
       reset
@@ -45,8 +42,9 @@ module Csvlint
         io = @source.respond_to?(:gets) ? @source : open(@source, :allow_redirections=>:all)
         validate_metadata(io)
         parse_csv(io)
-        unless @col_counts.inject(:+).nil?
-          build_warnings(:title_row, :structure) if @col_counts.first < (@col_counts.inject(:+) / @col_counts.count)
+        sum = @col_counts.inject(:+)
+        unless sum.nil?
+          build_warnings(:title_row, :structure) if @col_counts.first < (sum / @col_counts.size.to_f)
         end
         build_warnings(:check_options, :structure) if @expected_columns == 1
         check_consistency
@@ -110,54 +108,50 @@ module Csvlint
         end
         row = nil
         loop do
-          current_line = current_line + 1
-          begin
-            row = csv.shift
-            @data << row
-            wrapper.finished
-            if row
-              if header? && current_line == 1
-                row = row.reject {|r| r.blank? }
-                begin
-                  validate_header(row)
-                rescue Exception => re
-                  wrapper.finished
-                  build_errors(:header_count, :structure, current_line, nil, re.message)
-                  break
-                end
-                @col_counts << row.count
-              else
-                build_formats(row, current_line)
-                @col_counts << row.reject {|r| r.blank? }.count
-                @expected_columns = row.count unless @expected_columns != 0
-
-                build_errors(:blank_rows, :structure, current_line, nil, wrapper.line) if row.reject{ |c| c.nil? || c.empty? }.count == 0
-
-                if @schema
-                  @schema.validate_row(row, current_line)
-                  @errors += @schema.errors
-                  @warnings += @schema.warnings
-                else
-                  build_errors(:ragged_rows, :structure, current_line, nil, wrapper.line) if !row.empty? && row.count != @expected_columns
-                end
-              end
-              else
-              break
-            end
-          rescue CSV::MalformedCSVError => e
-            wrapper.finished
-            type = fetch_error(e)
-            if type == :stray_quote && !wrapper.line.match(csv.row_sep)
-              build_errors(:line_breaks, :structure)
-            else
-              build_errors(type, :structure, current_line, nil, wrapper.line)
-            end
-          end
-        end
-        rescue ArgumentError => ae
-          wrapper.finished
-          build_errors(:invalid_encoding, :structure, current_line, wrapper.line) unless reported_invalid_encoding
-          reported_invalid_encoding = true
+         current_line += 1
+         if @limit_lines && current_line > @limit_lines 
+           break
+         end
+         begin
+           wrapper.reset_line
+           row = csv.shift
+           @data << row
+           if row             
+             if current_line == 1 && header?
+               row = row.reject {|r| r.blank? }
+               validate_header(row)
+               @col_counts << row.size
+             else               
+               build_formats(row)
+               @col_counts << row.reject {|r| r.blank? }.size
+               @expected_columns = row.size unless @expected_columns != 0
+               
+               build_errors(:blank_rows, :structure, current_line, nil, wrapper.line) if row.reject{ |c| c.nil? || c.empty? }.size == 0
+               
+               if @schema
+                 @schema.validate_row(row, current_line)
+                 @errors += @schema.errors
+                 @warnings += @schema.warnings
+               else
+                 build_errors(:ragged_rows, :structure, current_line, nil, wrapper.line) if !row.empty? && row.size != @expected_columns
+               end
+               
+             end
+           else
+             break
+           end
+         rescue CSV::MalformedCSVError => e
+           type = fetch_error(e)
+           if type == :stray_quote && !wrapper.line.match(csv.row_sep)
+             build_errors(:line_breaks, :structure)
+           else
+             build_errors(type, :structure, current_line, nil, wrapper.line)
+           end
+         end
+      end
+      rescue ArgumentError => ae
+        build_errors(:invalid_encoding, :structure, current_line, wrapper.line) unless reported_invalid_encoding
+        reported_invalid_encoding = true
       end
     end
 
@@ -180,7 +174,7 @@ module Csvlint
     end
 
     def header?
-      return @csv_header
+      @csv_header
     end
 
     def fetch_error(error)
@@ -201,41 +195,59 @@ module Csvlint
         }
     end
 
-    def build_formats(row, line)
+    def build_formats(row) 
       row.each_with_index do |col, i|
         next if col.blank?
-        @formats[i] ||= []
+        @formats[i] ||= Hash.new(0)
 
-        SIMPLE_FORMATS.each do |type, lambda|
-          begin
-            lambda.call(col, {})
-            @format = type
-          rescue => e
-            nil
+        format = if col.strip[FORMATS[:numeric]]
+          if col[FORMATS[:date_number]] && date_format?(Date, col, '%Y%m%d')
+            :date_number
+          elsif col[FORMATS[:dateTime_number]] && date_format?(Time, col, '%Y%m%d%H%M%S')
+            :dateTime_number
+          elsif col[FORMATS[:dateTime_nsec]] && date_format?(Time, col, '%Y%m%d%H%M%S%N')
+            :dateTime_nsec
+          else
+            :numeric
           end
+        elsif uri?(col)
+          :uri
+        elsif col[FORMATS[:date_db]] && date_format?(Date, col, '%Y-%m-%d')
+          :date_db
+        elsif col[FORMATS[:date_short]] && date_format?(Date, col, '%e %b')
+          :date_short
+        elsif col[FORMATS[:date_rfc822]] && date_format?(Date, col, '%e %b %Y')
+          :date_rfc822
+        elsif col[FORMATS[:date_long]] && date_format?(Date, col, '%B %e, %Y')
+          :date_long
+        elsif col[FORMATS[:dateTime_time]] && date_format?(Time, col, '%H:%M')
+          :dateTime_time
+        elsif col[FORMATS[:dateTime_hms]] && date_format?(Time, col, '%H:%M:%S')
+          :dateTime_hms
+        elsif col[FORMATS[:dateTime_db]] && date_format?(Time, col, '%Y-%m-%d %H:%M:%S')
+          :dateTime_db
+        elsif col[FORMATS[:dateTime_iso8601]] && date_format?(Time, col, '%Y-%m-%dT%H:%M:%SZ')
+          :dateTime_iso8601
+        elsif col[FORMATS[:dateTime_short]] && date_format?(Time, col, '%d %b %H:%M')
+          :dateTime_short
+        elsif col[FORMATS[:dateTime_long]] && date_format?(Time, col, '%B %d, %Y %H:%M')
+          :dateTime_long
+        else
+          :string
         end
 
-        @formats[i] << @format
+        @formats[i][format] += 1
       end
     end
 
     def check_consistency
-      percentages = []
-
-      formats = SIMPLE_FORMATS.map {|type, lambda| type }
-
-      formats.each do |type, regex|
-        @formats.count.times do |i|
-          percentages[i] ||= {}
-          unless @formats[i].nil?
-            percentages[i][type] = @formats[i].grep(/^#{type}$/).count.to_f / @formats[i].count.to_f
+      @formats.each_with_index do |format,i|
+        if format
+          total = format.values.reduce(:+).to_f
+          if format.none?{|_,count| count / total >= 0.9}
+            build_warnings(:inconsistent_values, :schema, nil, i + 1)
           end
         end
-      end
-
-      percentages.each_with_index do |col, i|
-        next if col.values.blank?
-        build_warnings(:inconsistent_values, :schema, nil, i+1) if col.values.max < 0.9
       end
     end
 
@@ -257,5 +269,38 @@ module Csvlint
       end
     end
 
+    def uri?(value)
+      if value.strip[FORMATS[:uri]]
+        uri = URI.parse(value)
+        uri.kind_of?(URI::HTTP) || uri.kind_of?(URI::HTTPS)
+      end
+    rescue URI::InvalidURIError
+      false
+    end
+
+    def date_format?(klass, value, format)
+      klass.strptime(value, format).strftime(format) == value
+    rescue ArgumentError # invalid date
+      false
+    end
+
+    FORMATS = {
+      :string => nil,
+      :numeric => /\A[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\z/,
+      :uri => /\Ahttps?:/,
+      :date_db => /\A\d{4,}-\d\d-\d\d\z/,
+      :date_long => /\A(?:#{Date::MONTHNAMES.join('|')}) [ \d]\d, \d{4,}\z/,
+      :date_number => /\A\d{8}\z/,
+      :date_rfc822 => /\A[ \d]\d (?:#{Date::ABBR_MONTHNAMES.join('|')}) \d{4,}\z/,
+      :date_short => /\A[ \d]\d (?:#{Date::ABBR_MONTHNAMES.join('|')})\z/,
+      :dateTime_db => /\A\d{4,}-\d\d-\d\d \d\d:\d\d:\d\d\z/,
+      :dateTime_hms => /\A\d\d:\d\d:\d\d\z/,
+      :dateTime_iso8601 => /\A\d{4,}-\d\d-\d\dT\d\d:\d\d:\d\dZ\z/,
+      :dateTime_long => /\A(?:#{Date::MONTHNAMES.join('|')}) \d\d, \d{4,} \d\d:\d\d\z/,
+      :dateTime_nsec => /\A\d{23}\z/,
+      :dateTime_number => /\A\d{14}\z/,
+      :dateTime_short => /\A\d\d (?:#{Date::ABBR_MONTHNAMES.join('|')}) \d\d:\d\d\z/,
+      :dateTime_time => /\A\d\d:\d\d\z/,
+    }.freeze
   end
 end
